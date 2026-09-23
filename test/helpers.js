@@ -29,6 +29,56 @@ export function bruteForce(costs) {
   return best === null ? null : { totalCost: best, assignment: bestPerm };
 }
 
+// 独立预言机：穷举全部完美匹配，收集所有同价最优解 —— 仅用于小规模必然连线核对。
+// 返回 null（无完美匹配）或 { totalCost, matchings }，matchings 为全部最优排列的列表。
+export function enumerateOptima(costs) {
+  const n = costs.length;
+  const used = new Uint8Array(n);
+  const current = new Array(n);
+  let best = Infinity;
+  const matchings = [];
+
+  const dfs = (i, sum) => {
+    if (sum > best) return; // 已劣于已知最优，剪枝（等于仍可能并列最优，不能剪）
+    if (i === n) {
+      if (sum < best) {
+        best = sum;
+        matchings.length = 0;
+      }
+      matchings.push(current.slice());
+      return;
+    }
+    for (let j = 0; j < n; j++) {
+      if (used[j] === 1) continue;
+      const c = costs[i][j];
+      if (c === null) continue;
+      used[j] = 1;
+      current[i] = j;
+      dfs(i + 1, sum + c);
+      used[j] = 0;
+    }
+  };
+
+  dfs(0, 0);
+  return matchings.length === 0 ? null : { totalCost: best, matchings };
+}
+
+// 由全部最优解推出展示配对 displayed 的必然/可替换标记（预言机视角）：
+// forced[i]：所有最优解在第 i 行都与 displayed 一致；
+// alternatives[i]：所有最优解在第 i 行出现过的不同列数减 1（去掉当前配对自身）。
+export function oracleFlags(optima, displayed) {
+  const n = displayed.length;
+  const forced = new Array(n);
+  const alternatives = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const cols = new Set();
+    for (const m of optima.matchings) cols.add(m[i]);
+    forced[i] = optima.matchings.every((m) => m[i] === displayed[i]);
+    alternatives[i] = cols.size - 1;
+  }
+  return { forced, alternatives };
+}
+
 // 可复现的伪随机数（mulberry32），让随机测试与性能测试可重复。
 export function mulberry32(seed) {
   let a = seed >>> 0;

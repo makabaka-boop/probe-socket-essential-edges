@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { buildServer } from '../server/server.js';
-import { mulberry32 } from './helpers.js';
+import { mulberry32, randomCostMatrix, enumerateOptima, oracleFlags } from './helpers.js';
 
 // 支持两种运行方式：
 //   1) 默认：直接在进程内注入完整 HTTP 请求（含 JSON 解析）；
@@ -63,6 +63,20 @@ function assertAssignmentPerfect(costs, assignment) {
   return sum;
 }
 
+// 用穷举全部最优解的独立预言机，核对 API 返回的必然连线标记（针对实际返回的配对）。
+function expectAnalysisMatchesOracle(costs, data) {
+  const optima = enumerateOptima(costs);
+  expect(optima).not.toBeNull();
+  expect(data.totalCost).toBe(optima.totalCost);
+  expect(data.analysis).toBeDefined();
+  expect(data.analysis.forced).toHaveLength(costs.length);
+  expect(data.analysis.alternatives).toHaveLength(costs.length);
+  const oracle = oracleFlags(optima, data.assignment);
+  expect(data.analysis.forced).toEqual(oracle.forced);
+  expect(data.analysis.alternatives).toEqual(oracle.alternatives);
+  expect(data.analysis.forcedCount).toBe(oracle.forced.filter(Boolean).length);
+}
+
 describe('POST /api/solve：成功', () => {
   it('返回覆盖全部行列的配对与精确最小总代价', async () => {
     const { status, data } = await callSolve({ costs: good });
@@ -75,17 +89,33 @@ describe('POST /api/solve：成功', () => {
     expect(data.totalCost).toBe(205);
   });
 
+  it('成功响应携带必然连线分析，且标记与穷举预言机一致', async () => {
+    const { status, data } = await callSolve({ costs: good });
+    expect(status).toBe(200);
+    // 该矩阵最优解唯一：四条配对全部必然
+    expect(data.analysis).toEqual({
+      forced: [true, true, true, true],
+      alternatives: [0, 0, 0, 0],
+      forcedCount: 4,
+    });
+    expectAnalysisMatchesOracle(good, data);
+  });
+
   it('n=1：单个元素直接返回', async () => {
     const { status, data } = await callSolve({ costs: [[123]] });
     expect(status).toBe(200);
     expect(data.assignment).toEqual([0]);
     expect(data.totalCost).toBe(123);
+    expect(data.analysis).toEqual({ forced: [true], alternatives: [0], forcedCount: 1 });
   });
 
   it('n=1 且唯一格禁配 -> 409', async () => {
     const { status, data } = await callSolve({ costs: [[null]] });
     expect(status).toBe(409);
     expect(data.error).toBe('NO_PERFECT_ASSIGNMENT');
+    // 失败不携带方案，也不携带任何标记
+    expect(data.assignment).toBeUndefined();
+    expect(data.analysis).toBeUndefined();
   });
 
   it('排除一个配对后重算：给出替代最优或无解', async () => {
@@ -103,9 +133,60 @@ describe('POST /api/solve：成功', () => {
       expect(sum).toBe(second.data.totalCost);
       expect(second.data.assignment[0]).not.toBe(j0); // 原配对确实不再出现
       expect(second.data.totalCost).toBeGreaterThanOrEqual(first.data.totalCost);
+      // 重算结果带的是替代问题的全新分析，不是排除前的旧标记
+      expect(second.data.analysis).toBeDefined();
+      expectAnalysisMatchesOracle(reduced, second.data);
     } else {
       expect(second.status).toBe(409);
       expect(second.data.error).toBe('NO_PERFECT_ASSIGNMENT');
+      expect(second.data.analysis).toBeUndefined();
+    }
+  });
+
+  it('排除配对使同价最优消失：标记随新方案同次更新（可替换 -> 必然）', async () => {
+    // 2×2 全同价：两个最优解，没有必然连线
+    const tie = [
+      [5, 5],
+      [5, 5],
+    ];
+    const first = await callSolve({ costs: tie });
+    expect(first.status).toBe(200);
+    expect(first.data.analysis.forced).toEqual([false, false]);
+    expect(first.data.analysis.alternatives).toEqual([1, 1]);
+    expect(first.data.analysis.forcedCount).toBe(0);
+
+    const j0 = first.data.assignment[0];
+    const reduced = tie.map((row) => row.slice());
+    reduced[0][j0] = null;
+    const second = await callSolve({ costs: reduced });
+    expect(second.status).toBe(200);
+    expect(second.data.assignment[0]).not.toBe(j0);
+    // 排除后只剩一个可行（也是最优）完美匹配：两条配对都变必然
+    expect(second.data.analysis.forced).toEqual([true, true]);
+    expect(second.data.analysis.alternatives).toEqual([0, 0]);
+    expect(second.data.analysis.forcedCount).toBe(2);
+  });
+});
+
+describe('POST /api/solve：分析标记与穷举预言机一致（随机小矩阵）', () => {
+  it('稠密/含禁配/零价/重复代价混合（n≤6）', async () => {
+    const rng = mulberry32(20260923);
+    for (let t = 0; t < 30; t++) {
+      const n = 1 + Math.floor(rng() * 6);
+      const costs = randomCostMatrix(n, rng, {
+        forbiddenRate: t % 2 === 0 ? 0 : 0.3,
+        maxCost: t % 3, // 0..2：大量重复代价与零价，并列最优多
+      });
+      const { status, data } = await callSolve({ costs });
+      const optima = enumerateOptima(costs);
+      if (optima === null) {
+        expect(status).toBe(409);
+        expect(data.error).toBe('NO_PERFECT_ASSIGNMENT');
+        expect(data.analysis).toBeUndefined();
+      } else {
+        expect(status).toBe(200);
+        expectAnalysisMatchesOracle(costs, data);
+      }
     }
   });
 });
@@ -122,6 +203,8 @@ describe('POST /api/solve：409 NO_PERFECT_ASSIGNMENT', () => {
     expect(status).toBe(409);
     expect(data.status).toBe('error');
     expect(data.error).toBe('NO_PERFECT_ASSIGNMENT');
+    expect(data.assignment).toBeUndefined();
+    expect(data.analysis).toBeUndefined();
   });
 
   it('整行禁配', async () => {
@@ -134,6 +217,7 @@ describe('POST /api/solve：409 NO_PERFECT_ASSIGNMENT', () => {
     });
     expect(status).toBe(409);
     expect(data.error).toBe('NO_PERFECT_ASSIGNMENT');
+    expect(data.analysis).toBeUndefined();
   });
 });
 
@@ -162,6 +246,9 @@ describe('POST /api/solve：422 INVALID_INPUT', () => {
       expect(status).toBe(422);
       expect(data.status).toBe('error');
       expect(data.error).toBe('INVALID_INPUT');
+      // 输入非法不能留下任何方案或标记
+      expect(data.assignment).toBeUndefined();
+      expect(data.analysis).toBeUndefined();
     });
   }
 
@@ -183,6 +270,15 @@ describe('POST /api/solve：n=400 稠密矩阵性能与精度', () => {
     const { status, data, elapsedMs } = await callSolve({ costs });
     expect(status).toBe(200);
     expect(data.assignment).toHaveLength(n);
+    // 必然连线分析随方案同次返回，结构完整
+    expect(data.analysis.forced).toHaveLength(n);
+    expect(data.analysis.alternatives).toHaveLength(n);
+    expect(data.analysis.forcedCount).toBe(data.analysis.forced.filter(Boolean).length);
+    for (let i = 0; i < n; i++) {
+      expect(typeof data.analysis.forced[i]).toBe('boolean');
+      expect(Number.isInteger(data.analysis.alternatives[i])).toBe(true);
+      if (data.analysis.forced[i]) expect(data.analysis.alternatives[i]).toBe(0);
+    }
     // 精确复算（小于 2^53）
     const sum = assertAssignmentPerfect(costs, data.assignment);
     expect(sum).toBe(data.totalCost);

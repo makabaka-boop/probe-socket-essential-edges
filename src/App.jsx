@@ -31,7 +31,9 @@ export default function App() {
     ])
   );
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null); // { assignment, totalCost, elapsedMs }
+  // result 一次性携带方案与必然连线分析：{ assignment, totalCost, analysis, elapsedMs }
+  // 编辑/失败/排除重算都会整体置 null，不会残留与当前矩阵不符的旧标记。
+  const [result, setResult] = useState(null);
   const [error, setError] = useState(null); // { status, code, message }
   const [excludedHint, setExcludedHint] = useState(null); // 刚刚排除的格
 
@@ -85,6 +87,7 @@ export default function App() {
         setResult({
           assignment: data.assignment,
           totalCost: data.totalCost,
+          analysis: data.analysis || null, // { forced, alternatives, forcedCount }，与本次配对同源
           elapsedMs: Math.round(performance.now() - started),
         });
       } else {
@@ -123,6 +126,16 @@ export default function App() {
     if (!result) return null;
     const s = new Set();
     result.assignment.forEach((j, i) => s.add(i * n + j));
+    return s;
+  }, [result, n]);
+
+  // 必然连线格集合（与 matchedSet 同源，随 result 一起更新/清空）。
+  const forcedSet = useMemo(() => {
+    if (!result || !result.analysis) return null;
+    const s = new Set();
+    result.assignment.forEach((j, i) => {
+      if (result.analysis.forced[i]) s.add(i * n + j);
+    });
     return s;
   }, [result, n]);
 
@@ -229,13 +242,54 @@ export default function App() {
               <span className="meta">耗时 {result.elapsedMs} ms</span>
             </div>
           </div>
+          {result.analysis && (
+            <div className="legend">
+              <span className="legend-item">
+                <span className="badge forced">必然</span>
+                所有同价最优方案都经过这条连线，不可改动
+              </span>
+              <span className="legend-item">
+                <span className="badge replaceable">可替换</span>
+                存在不经过它的同价最优方案，括号内为可替换连线数量
+              </span>
+              <span className="meta">
+                本方案必然连线 {result.analysis.forcedCount} 条 · 可替换{' '}
+                {result.assignment.length - result.analysis.forcedCount} 条
+              </span>
+            </div>
+          )}
           <div className="pairs">
             {result.assignment.map((j, i) => (
-              <div key={i} className={`pair ${excludedHint && excludedHint.i === i && excludedHint.j === j ? 'just-excluded' : ''}`}>
+              <div
+                key={i}
+                className={`pair ${
+                  result.analysis
+                    ? result.analysis.forced[i]
+                      ? 'forced'
+                      : 'replaceable'
+                    : ''
+                } ${excludedHint && excludedHint.i === i && excludedHint.j === j ? 'just-excluded' : ''}`}
+              >
                 <span className="pair-label">
                   探针 {i + 1} → 座 {j + 1}
                 </span>
                 <span className="pair-cost">{matrix[i][j]?.toLocaleString('zh-CN')}</span>
+                {result.analysis &&
+                  (result.analysis.forced[i] ? (
+                    <span
+                      className="badge forced"
+                      title="所有同价最优方案都包含这条连线，不可改动"
+                    >
+                      必然
+                    </span>
+                  ) : (
+                    <span
+                      className="badge replaceable"
+                      title="存在不经过这条连线的同价最优方案"
+                    >
+                      可替换×{result.analysis.alternatives[i]}
+                    </span>
+                  ))}
                 <button
                   className="exclude"
                   disabled={loading}
@@ -255,6 +309,7 @@ export default function App() {
           n={n}
           matrix={matrix}
           matchedSet={matchedSet}
+          forcedSet={forcedSet}
           locked={loading}
           excludedHint={excludedHint}
           onEdit={editCell}

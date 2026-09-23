@@ -3,7 +3,8 @@ import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { hungarian, NoPerfectAssignmentError } from './hungarian.js';
+import { NoPerfectAssignmentError } from './hungarian.js';
+import { analyzeForcedEdges } from './forcedEdges.js';
 import { validateCosts } from './validation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,12 +48,21 @@ export async function buildServer() {
     }
 
     try {
-      const { assignment, totalCost } = hungarian(request.body.costs);
+      // 求解与必然连线分析同源：assignment/totalCost 与纯求解器完全一致，
+      // 分析标记逐条对应本次返回的配对；只输出稳定结论，不暴露势函数等中间态。
+      const { assignment, totalCost, forced, alternatives, forcedCount } = analyzeForcedEdges(
+        request.body.costs
+      );
       return reply.send({
         status: 'ok',
         n: result.n,
         assignment, // assignment[i] = 第 i 行（探针）匹配的列（测试座），0 基下标
         totalCost, // 精确整数，可由 assignment 对原矩阵直接复算
+        analysis: {
+          forced, // forced[i]：该配对是否出现在所有同价最优完美匹配中（必然连线）
+          alternatives, // alternatives[i]：该配对的可替换连线数量（必然配对为 0）
+          forcedCount, // 必然连线总数
+        },
       });
     } catch (err) {
       if (err instanceof NoPerfectAssignmentError) {

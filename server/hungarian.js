@@ -11,12 +11,15 @@ export class NoPerfectAssignmentError extends Error {
 }
 
 /**
+ * 匈牙利算法核心：返回配对、精确总代价与最优对偶势函数。
+ * 势函数满足（对全部允许边）：costs[i][j] - u[i+1] - v[j+1] >= 0，
+ * 且每条匹配边的该“简约代价”恰为 0 —— 这是供必然连线分析复用的最优性证书。
  * @param {ReadonlyArray<ReadonlyArray<number | null>>} costs n×n，元素为 null 或 [0,1e12] 整数
- * @returns {{ assignment: number[], totalCost: number }}
- *   assignment[i] 表示第 i 行探针匹配的列；totalCost 为精确整数总和
+ * @returns {{ assignment: number[], totalCost: number, u: Float64Array, v: Float64Array }}
+ *   assignment[i] 表示第 i 行探针匹配的列；u/v 为 1..n 下标的行/列势
  * @throws {NoPerfectAssignmentError} 不存在覆盖全部行列的完美匹配
  */
-export function hungarian(costs) {
+export function hungarianDetailed(costs) {
   const n = costs.length;
 
   // 转为 1..n 下标的稠密代价矩阵。
@@ -113,5 +116,16 @@ export function hungarian(costs) {
     totalCost += c;
   }
 
-  return { assignment: Array.from(assignment), totalCost };
+  return { assignment: Array.from(assignment), totalCost, u, v };
+}
+
+/**
+ * @param {ReadonlyArray<ReadonlyArray<number | null>>} costs n×n，元素为 null 或 [0,1e12] 整数
+ * @returns {{ assignment: number[], totalCost: number }}
+ *   assignment[i] 表示第 i 行探针匹配的列；totalCost 为精确整数总和
+ * @throws {NoPerfectAssignmentError} 不存在覆盖全部行列的完美匹配
+ */
+export function hungarian(costs) {
+  const { assignment, totalCost } = hungarianDetailed(costs);
+  return { assignment, totalCost };
 }

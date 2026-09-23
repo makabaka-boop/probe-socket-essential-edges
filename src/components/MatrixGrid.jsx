@@ -5,7 +5,8 @@ const HEAD = 46;       // 行/列表头宽度/高度 px
 const OVERSCAN = 4;    // 视口外预渲染格数
 
 // 只渲染可视区域内的格子（n=400 时约几百个），表头跟随滚动平移。
-export default function MatrixGrid({ n, matrix, matchedSet, locked, excludedHint, onEdit }) {
+// matchedSet：当前方案配对的扁平格 key；forcedSet：其中必然连线的格 key（琥珀色高亮）。
+export default function MatrixGrid({ n, matrix, matchedSet, forcedSet, locked, excludedHint, onEdit }) {
   const scrollRef = useRef(null);
   const [scroll, setScroll] = useState({ top: 0, left: 0 });
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
@@ -51,15 +52,18 @@ export default function MatrixGrid({ n, matrix, matchedSet, locked, excludedHint
   for (let i = r0; i <= r1; i++) {
     for (let j = c0; j <= c1; j++) {
       const value = matrix[i][j];
-      const matched = matchedSet ? matchedSet.has(i * n + j) : false;
+      const key = i * n + j;
+      const matched = matchedSet ? matchedSet.has(key) : false;
+      const forced = forcedSet ? forcedSet.has(key) : false;
       const justExcluded = excludedHint && excludedHint.i === i && excludedHint.j === j;
       cells.push(
         <Cell
-          key={i * n + j}
+          key={key}
           i={i}
           j={j}
           value={value}
           matched={matched}
+          forced={forced}
           justExcluded={justExcluded}
           disabled={locked}
           onEdit={onEdit}
@@ -122,7 +126,7 @@ export default function MatrixGrid({ n, matrix, matchedSet, locked, excludedHint
   );
 }
 
-function Cell({ i, j, value, matched, justExcluded, disabled, onEdit }) {
+function Cell({ i, j, value, matched, forced, justExcluded, disabled, onEdit }) {
   const [text, setText] = useState(value === null ? '' : String(value));
   const [editing, setEditing] = useState(false);
 
@@ -154,6 +158,7 @@ function Cell({ i, j, value, matched, justExcluded, disabled, onEdit }) {
     'cell',
     isNull ? 'forbidden' : '',
     matched ? 'matched' : '',
+    forced ? 'forced' : '',
     justExcluded ? 'just-excluded' : '',
   ]
     .filter(Boolean)
@@ -163,7 +168,9 @@ function Cell({ i, j, value, matched, justExcluded, disabled, onEdit }) {
     <div
       className={className}
       style={{ left: HEAD + j * CELL, top: HEAD + i * CELL, width: CELL, height: CELL }}
-      title={`探针 ${i + 1} → 测试座 ${j + 1}${isNull ? '（禁配）' : `，代价 ${value}`}`}
+      title={`探针 ${i + 1} → 测试座 ${j + 1}${
+        isNull ? '（禁配）' : `，代价 ${value}`
+      }${forced ? '（必然连线：所有同价最优方案共有）' : ''}`}
       onDoubleClick={() => !disabled && setEditing(true)}
     >
       {editing && !disabled ? (
