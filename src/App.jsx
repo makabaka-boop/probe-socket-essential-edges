@@ -31,7 +31,9 @@ export default function App() {
     ])
   );
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null); // { assignment, totalCost, elapsedMs }
+  // result 与分析标记同一次更新、同一次清除：
+  // { assignment, totalCost, elapsedMs, pairFlags: [{forced, alternatives}] }
+  const [result, setResult] = useState(null);
   const [error, setError] = useState(null); // { status, code, message }
   const [excludedHint, setExcludedHint] = useState(null); // 刚刚排除的格
 
@@ -82,10 +84,13 @@ export default function App() {
       });
       const data = await resp.json().catch(() => null);
       if (resp.ok && data && data.status === 'ok') {
+        // 标记与方案来自同一次响应；缺字段（异常/旧服务）时不臆造，整体不展示标记。
+        const pairFlags = Array.isArray(data.pairFlags) ? data.pairFlags : null;
         setResult({
           assignment: data.assignment,
           totalCost: data.totalCost,
           elapsedMs: Math.round(performance.now() - started),
+          pairFlags,
         });
       } else {
         // 两类失败（422 / 409）都清除旧方案
@@ -125,6 +130,23 @@ export default function App() {
     result.assignment.forEach((j, i) => s.add(i * n + j));
     return s;
   }, [result, n]);
+
+  // 每个展示配对的必然标记（key=i*n+j → 'forced' | 'flexible'）。
+  // 只覆盖当前展示的配对，随 result 同生同灭，不跨输入/重算残留。
+  const matchedMarks = useMemo(() => {
+    if (!result || !result.pairFlags) return null;
+    const m = new Map();
+    result.assignment.forEach((j, i) => {
+      const flag = result.pairFlags[i];
+      m.set(i * n + j, flag && flag.forced === true ? 'forced' : 'flexible');
+    });
+    return m;
+  }, [result, n]);
+
+  const forcedCount = useMemo(() => {
+    if (!result || !result.pairFlags) return 0;
+    return result.pairFlags.reduce((acc, f) => acc + (f && f.forced === true ? 1 : 0), 0);
+  }, [result]);
 
   // 用返回的配对对原始矩阵独立复算总和，精确核对服务端结果。
   const recomputed = useMemo(() => {
@@ -230,23 +252,58 @@ export default function App() {
             </div>
           </div>
           <div className="pairs">
-            {result.assignment.map((j, i) => (
-              <div key={i} className={`pair ${excludedHint && excludedHint.i === i && excludedHint.j === j ? 'just-excluded' : ''}`}>
-                <span className="pair-label">
-                  探针 {i + 1} → 座 {j + 1}
-                </span>
-                <span className="pair-cost">{matrix[i][j]?.toLocaleString('zh-CN')}</span>
-                <button
-                  className="exclude"
-                  disabled={loading}
-                  title="把该格设为禁配并重新求解替代最优方案"
-                  onClick={() => excludePair(i, j)}
+            {result.assignment.map((j, i) => {
+              const flag = result.pairFlags ? result.pairFlags[i] : null;
+              const forced = flag && flag.forced === true;
+              const alternatives = flag ? Number(flag.alternatives) || 0 : 0;
+              return (
+                <div
+                  key={i}
+                  className={`pair ${flag ? (forced ? 'forced' : 'flexible') : ''} ${
+                    excludedHint && excludedHint.i === i && excludedHint.j === j ? 'just-excluded' : ''
+                  }`}
                 >
-                  排除此配对
-                </button>
-              </div>
-            ))}
+                  <span className="pair-label">
+                    探针 {i + 1} → 座 {j + 1}
+                  </span>
+                  <span className="pair-cost">{matrix[i][j]?.toLocaleString('zh-CN')}</span>
+                  {flag && (
+                    <span
+                      className={`pair-flag ${forced ? 'is-forced' : 'is-flexible'}`}
+                      title={
+                        forced
+                          ? '必然连线：在每一个同价最优方案中，该探针都只能配该测试座'
+                          : `可替换：存在其他最优方案把该探针改配（本探针在最优解中有 ${alternatives} 条可替换连线）`
+                      }
+                    >
+                      {forced ? '必然连线' : `可替换 ×${alternatives}`}
+                    </span>
+                  )}
+                  <button
+                    className="exclude"
+                    disabled={loading}
+                    title="把该格设为禁配并重新求解替代最优方案"
+                    onClick={() => excludePair(i, j)}
+                  >
+                    排除此配对
+                  </button>
+                </div>
+              );
+            })}
           </div>
+          {result.pairFlags && (
+            <p className="flags-legend">
+              <span className="legend-item">
+                <i className="dot forced-dot" /> 必然连线
+              </span>
+              ：所有同价最优方案都必须采用，不可替换；
+              <span className="legend-item">
+                <i className="dot flexible-dot" /> 可替换
+              </span>
+              ：存在别的最优方案把该探针改配，×N 为可替换连线数（共 {forcedCount} 条必然 /{' '}
+              {n - forcedCount} 条可替换）。标记只针对当前展示方案，排除配对或编辑后随重算更新。
+            </p>
+          )}
         </section>
       )}
 
@@ -255,6 +312,7 @@ export default function App() {
           n={n}
           matrix={matrix}
           matchedSet={matchedSet}
+          matchedMarks={matchedMarks}
           locked={loading}
           excludedHint={excludedHint}
           onEdit={editCell}

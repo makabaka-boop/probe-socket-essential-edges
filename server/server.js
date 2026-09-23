@@ -3,7 +3,8 @@ import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { hungarian, NoPerfectAssignmentError } from './hungarian.js';
+import { NoPerfectAssignmentError } from './hungarian.js';
+import { analyzeMandatoryPairs } from './mandatory.js';
 import { validateCosts } from './validation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,12 +48,17 @@ export async function buildServer() {
     }
 
     try {
-      const { assignment, totalCost } = hungarian(request.body.costs);
+      // 同一次求解内完成最优匹配与必然连线分析：求解器可任选一个最优配对，
+      // pairFlags 严格对应下方返回（即页面展示）的这一组配对。
+      const { assignment, totalCost, pairFlags } = analyzeMandatoryPairs(request.body.costs);
       return reply.send({
         status: 'ok',
         n: result.n,
         assignment, // assignment[i] = 第 i 行（探针）匹配的列（测试座），0 基下标
         totalCost, // 精确整数，可由 assignment 对原矩阵直接复算
+        // 与 assignment 逐行对齐：forced=该连线出现在所有最优完美匹配中；
+        // alternatives=该探针在最优解中可改配的其他列数（forced 时为 0）。
+        pairFlags,
       });
     } catch (err) {
       if (err instanceof NoPerfectAssignmentError) {

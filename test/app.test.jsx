@@ -41,9 +41,22 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function okResp(assignment, totalCost, n = 4) {
-  return jsonResponse(200, { status: 'ok', n, assignment, totalCost });
+function okResp(assignment, totalCost, n = 4, pairFlags) {
+  return jsonResponse(200, { status: 'ok', n, assignment, totalCost, pairFlags });
 }
+
+const ALL_FLEXIBLE_4 = [
+  { forced: false, alternatives: 1 },
+  { forced: false, alternatives: 1 },
+  { forced: false, alternatives: 1 },
+  { forced: false, alternatives: 1 },
+];
+const ALL_FORCED_4 = [
+  { forced: true, alternatives: 0 },
+  { forced: true, alternatives: 0 },
+  { forced: true, alternatives: 0 },
+  { forced: true, alternatives: 0 },
+];
 
 describe('App 页面：请求锁定 / 编辑清方案 / 排除重算', () => {
   it('请求期间锁定编辑与提交，返回后展示方案；之后编辑立即清除旧方案', async () => {
@@ -157,5 +170,116 @@ describe('App 页面：请求锁定 / 编辑清方案 / 排除重算', () => {
     fireEvent.click(getByText('求解最小分配'));
     await findByText(/INVALID_INPUT/);
     expect(queryByText('最优分配方案')).toBeNull();
+  });
+
+  it('必然/可替换标记与方案同一次更新：按行渲染徽标与解释，且只针对展示配对', async () => {
+    // 前两条必然、后两条可替换
+    const flags = [
+      { forced: true, alternatives: 0 },
+      { forced: true, alternatives: 0 },
+      { forced: false, alternatives: 2 },
+      { forced: false, alternatives: 1 },
+    ];
+    vi.stubGlobal('fetch', async () => okResp([3, 0, 1, 2], 205, 4, flags));
+    const { getByText, getAllByText, findByText, container } = render(<App />);
+    fireEvent.click(getByText('求解最小分配'));
+    await findByText('最优分配方案');
+
+    // 徽标数量与配对一致（只数配对卡片，不含下方图例）；文案可解释必然/可替换
+    const pairsBox = container.querySelector('.pairs');
+    expect(pairsBox.querySelectorAll('.pair-flag.is-forced')).toHaveLength(2);
+    expect(pairsBox.querySelectorAll('.pair-flag.is-flexible')).toHaveLength(2);
+    expect(getAllByText('可替换 ×2')).toHaveLength(1);
+    expect(getAllByText('可替换 ×1')).toHaveLength(1);
+    // 汇总结论
+    expect(getByText(/共 2 条必然/)).toBeTruthy();
+
+    // 矩阵高亮：展示配对格按标记加 class（n=4 全部在视口内）
+    const forcedCells = container.querySelectorAll('.cell.match-forced');
+    const flexibleCells = container.querySelectorAll('.cell.match-flexible');
+    expect(forcedCells).toHaveLength(2);
+    expect(flexibleCells).toHaveLength(2);
+  });
+
+  it('响应缺 pairFlags 时不渲染任何标记（不臆造、不崩）', async () => {
+    vi.stubGlobal('fetch', async () => okResp([3, 0, 1, 2], 205));
+    const { getByText, findByText, queryByText, container } = render(<App />);
+    fireEvent.click(getByText('求解最小分配'));
+    await findByText('最优分配方案');
+    expect(container.querySelector('.pairs').querySelectorAll('.pair-flag')).toHaveLength(0);
+    expect(container.querySelectorAll('.pair-flag')).toHaveLength(0);
+    expect(container.querySelectorAll('.cell.match-forced')).toHaveLength(0);
+  });
+
+  it('编辑后旧标记随方案一起清除，不会残留上一轮结论', async () => {
+    vi.stubGlobal('fetch', async () => okResp([3, 0, 1, 2], 205, 4, ALL_FORCED_4));
+    const { getByText, findByText, queryByText, container } = render(<App />);
+    fireEvent.click(getByText('求解最小分配'));
+    await findByText('最优分配方案');
+    expect(container.querySelector('.pairs').querySelectorAll('.pair-flag.is-forced')).toHaveLength(4);
+
+    // 改一个格：方案与标记同时消失
+    const cell90 = Array.from(container.querySelectorAll('.cell-value')).find(
+      (b) => b.textContent === '90'
+    );
+    fireEvent.click(cell90);
+    const input = container.querySelector('.cell-input');
+    fireEvent.change(input, { target: { value: '123' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(queryByText('最优分配方案')).toBeNull();
+    expect(container.querySelectorAll('.pair-flag')).toHaveLength(0);
+    expect(container.querySelectorAll('.cell.match-forced')).toHaveLength(0);
+  });
+
+  it('排除配对重算：标记随新方案重新分析，不沿用排除前的可替换结论', async () => {
+    const fetchMock = vi.fn(async (url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.costs[0][3] === null) {
+        // 替代问题：新展示的 4 条配对全部必然
+        return okResp([2, 0, 1, 3], 295, 4, ALL_FORCED_4);
+      }
+      // 原方案：全部可替换
+      return okResp([3, 0, 1, 2], 205, 4, ALL_FLEXIBLE_4);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { getByText, getAllByText, findByText, container } = render(<App />);
+    fireEvent.click(getByText('求解最小分配'));
+    await findByText('最优分配方案');
+    const pairsBox = container.querySelector('.pairs');
+    expect(pairsBox.querySelectorAll('.pair-flag.is-flexible')).toHaveLength(4);
+    expect(pairsBox.querySelectorAll('.pair-flag.is-forced')).toHaveLength(0);
+
+    fireEvent.click(getAllByText('排除此配对')[0]);
+    await findByText('295');
+    // 新方案：4 条必然，且旧的“可替换”徽标一个不剩（同一次更新切换）
+    expect(container.querySelector('.pairs').querySelectorAll('.pair-flag.is-forced')).toHaveLength(4);
+    expect(container.querySelector('.pairs').querySelectorAll('.pair-flag.is-flexible')).toHaveLength(0);
+  });
+
+  it('排除后 409：方案与标记一并清除，不保留排除前的必然徽标', async () => {
+    const fetchMock = vi.fn(async (url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.costs[0][3] === null) {
+        return jsonResponse(409, {
+          status: 'error',
+          error: 'NO_PERFECT_ASSIGNMENT',
+          message: '禁配关系下不存在覆盖全部探针与测试座的完美匹配',
+        });
+      }
+      return okResp([3, 0, 1, 2], 205, 4, ALL_FORCED_4);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { getByText, getAllByText, findByText, queryByText, container } = render(<App />);
+    fireEvent.click(getByText('求解最小分配'));
+    await findByText('最优分配方案');
+    expect(container.querySelector('.pairs').querySelectorAll('.pair-flag.is-forced')).toHaveLength(4);
+
+    fireEvent.click(getAllByText('排除此配对')[0]);
+    await findByText(/NO_PERFECT_ASSIGNMENT/);
+    expect(queryByText('最优分配方案')).toBeNull();
+    expect(container.querySelectorAll('.pair-flag')).toHaveLength(0);
+    expect(container.querySelectorAll('.cell.match-forced')).toHaveLength(0);
   });
 });

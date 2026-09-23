@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { buildServer } from '../server/server.js';
-import { mulberry32 } from './helpers.js';
+import { mulberry32, bruteForceOptimalSet, randomCostMatrix } from './helpers.js';
 
 // 支持两种运行方式：
 //   1) 默认：直接在进程内注入完整 HTTP 请求（含 JSON 解析）；
@@ -172,6 +172,112 @@ describe('POST /api/solve：422 INVALID_INPUT', () => {
   });
 });
 
+describe('POST /api/solve：必然连线标记', () => {
+  it('成功响应在同一次返回中携带与 assignment 对齐的 pairFlags', async () => {
+    const { status, data } = await callSolve({ costs: good });
+    expect(status).toBe(200);
+    expect(Array.isArray(data.pairFlags)).toBe(true);
+    expect(data.pairFlags).toHaveLength(4);
+    for (const flag of data.pairFlags) {
+      expect(typeof flag.forced).toBe('boolean');
+      expect(Number.isInteger(flag.alternatives)).toBe(true);
+      expect(flag.alternatives).toBeGreaterThanOrEqual(0);
+      expect(flag.forced).toBe(flag.alternatives === 0);
+    }
+  });
+
+  it('全零矩阵：每条展示配对都可替换，alternatives=n-1', async () => {
+    const zero = [
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    ];
+    const { status, data } = await callSolve({ costs: zero });
+    expect(status).toBe(200);
+    expect(data.totalCost).toBe(0);
+    expect(data.pairFlags).toHaveLength(3);
+    expect(data.pairFlags.every((f) => f.forced === false && f.alternatives === 2)).toBe(true);
+  });
+
+  it('唯一可行排列：全部必然，alternatives=0', async () => {
+    const costs = [
+      [5, null, null],
+      [null, 7, null],
+      [null, null, 9],
+    ];
+    const { status, data } = await callSolve({ costs });
+    expect(status).toBe(200);
+    expect(data.pairFlags.every((f) => f.forced === true && f.alternatives === 0)).toBe(true);
+  });
+
+  it('禁配 + 断开块：标记与独立穷举预言机一致（多轮小矩阵）', async () => {
+    const rng = mulberry32(2026092301);
+    for (let t = 0; t < 60; t++) {
+      const n = 1 + Math.floor(rng() * 5);
+      const costs = randomCostMatrix(n, rng, {
+        forbiddenRate: t % 3 === 0 ? 0.4 : t % 3 === 1 ? 0.2 : 0,
+        maxCost: t % 2 === 0 ? 3 : 100,
+      });
+      const { status, data } = await callSolve({ costs });
+      const oracle = bruteForceOptimalSet(costs);
+      if (oracle === null) {
+        expect(status).toBe(409);
+        expect(data.pairFlags).toBeUndefined(); // 失败不携带任何标记
+        continue;
+      }
+      expect(status).toBe(200);
+      expect(data.totalCost).toBe(oracle.totalCost);
+      const shownOptimal = oracle.optimalAssignments.some((p) =>
+        p.every((j, i) => j === data.assignment[i])
+      );
+      expect(shownOptimal).toBe(true);
+      const expected = oracle.flagsFor(data.assignment);
+      expect(data.pairFlags).toEqual(expected);
+    }
+  });
+
+  it('409 响应不携带方案与标记（不留旧标记由页面保证，接口本身不返回）', async () => {
+    const { status, data } = await callSolve({
+      costs: [
+        [5, null, null],
+        [2, null, null],
+        [7, 1, 3],
+      ],
+    });
+    expect(status).toBe(409);
+    expect(data.assignment).toBeUndefined();
+    expect(data.totalCost).toBeUndefined();
+    expect(data.pairFlags).toBeUndefined();
+  });
+
+  it('422 响应同样不携带标记', async () => {
+    const { status, data } = await callSolve({ costs: [[1, 2]] });
+    expect(status).toBe(422);
+    expect(data.pairFlags).toBeUndefined();
+  });
+
+  it('排除一条展示配对后重算：标记针对新展示方案重新给出，价格不受分析影响', async () => {
+    // 同价 2×2 平局：第一次两条都可替换；排除 (0,j0) 后只剩唯一方案，全部必然。
+    const tie = [
+      [5, 5],
+      [5, 5],
+    ];
+    const first = await callSolve({ costs: tie });
+    expect(first.status).toBe(200);
+    expect(first.data.totalCost).toBe(10);
+    expect(first.data.pairFlags.every((f) => f.forced === false)).toBe(true);
+    const j0 = first.data.assignment[0];
+
+    const reduced = tie.map((row) => row.slice());
+    reduced[0][j0] = null;
+    const second = await callSolve({ costs: reduced });
+    expect(second.status).toBe(200);
+    expect(second.data.assignment[0]).not.toBe(j0);
+    // 替代问题中每个探针只剩唯一列：新方案全部必然，而非沿用排除前的可替换标记
+    expect(second.data.pairFlags.every((f) => f.forced === true && f.alternatives === 0)).toBe(true);
+  });
+});
+
 describe('POST /api/solve：n=400 稠密矩阵性能与精度', () => {
   it('三秒内经 API 返回精确最优解', async () => {
     const n = 400;
@@ -183,6 +289,8 @@ describe('POST /api/solve：n=400 稠密矩阵性能与精度', () => {
     const { status, data, elapsedMs } = await callSolve({ costs });
     expect(status).toBe(200);
     expect(data.assignment).toHaveLength(n);
+    expect(data.pairFlags).toHaveLength(n); // 分析与方案同一次返回
+    for (const flag of data.pairFlags) expect(typeof flag.forced).toBe('boolean');
     // 精确复算（小于 2^53）
     const sum = assertAssignmentPerfect(costs, data.assignment);
     expect(sum).toBe(data.totalCost);
